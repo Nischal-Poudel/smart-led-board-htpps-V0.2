@@ -1,16 +1,36 @@
 // Smart Led V2:- Access the user data from the htpps server of hamropalika and display it on the Display.
 
 #include <Arduino.h>
-#include <ArduinoJson.h>
-#include <WiFi.h>
-#include <WiFiClientSecure.h>
+#include <ArduinoJson.h>      //To parse the API data
+#include <WiFi.h>             //to connect to the internet theough Wifi
+#include <WiFiClientSecure.h> //To access Https webpages
+
+#include <HTTPClient.h> //To activate the Access Point
+#include <WebServer.h>  //To host the local server.
+
 #include <PxMatrix.h>
 #include "OneButton.h"               //we need the OneButton library to detect diffrent push functions.
 #include <Fonts/FreeSansBold9pt7b.h> //Custom Font for Name.
-#include <Adafruit_I2CDevice.h>
+//#include <Adafruit_I2CDevice.h>
 
 #include <Preferences.h> //to store the values to flash memory
 Preferences storage;     // create a instance for the code
+
+/*-------------------------------------------------------------------------*/
+String st;
+String content;
+int i = 0;
+int statusCode;
+const char *AP_ssid = "Smart LED Board";
+const char *AP_password = "smarttech";
+
+// Function Decalration
+void launchWeb(void);
+void setupAP(void);
+
+// Establishing Local server at port 80
+WebServer server(80);
+/*-------------------------------------------------------------------------*/
 
 void update_data(void); // function declaration
 void doubleclick();
@@ -27,20 +47,22 @@ void scrolling_notice(String Snotice);
 #define P_E 15
 #define P_OE 5
 
+hw_timer_t *timer = NULL;
+portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
+
 const int btn = 26; // Button (Pulled High);
 const int ldr = 27; // Light Sensor(LDR) (AnalogInput)
 
 OneButton button(btn, true); //[Active LOW]   //attach a button on pin 4 to the library
-
-hw_timer_t *timer = NULL;
-portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
 
 #define matrix_width 128
 #define matrix_height 64
 /* This defines the 'on' time of the display is us. The larger this number,
 the brighter the display. If too large the ESP will crash */
 
-uint8_t display_draw_time = 50; // 30-70 is usually fine
+uint8_t display_draw_time = 20; // 30-70 is usually fine
+// adding this value more and there will be no diplay.
+
 PxMATRIX display(128, 64, P_LAT, P_OE, P_A, P_B, P_C, P_D, P_E);
 
 // Wifi credincials
@@ -61,7 +83,6 @@ const uint16_t port = 443;
 
 // For HTTPS requests
 WiFiClientSecure https;
-
 
 long httpget_timer;
 /******************************************************************************************************/
@@ -112,6 +133,9 @@ String disp_data_notice = "";
 String Innotice = "Available!";
 String Busynotice = "Engaged!";
 bool disp_data_isPermanent = 0;
+
+String data_ssid = "";
+String data_password = "";
 
 // to retreve the data from the web.
 String data_firstname = "";   // Ashish
@@ -166,27 +190,34 @@ void wifi_connect()
 {
 
   Serial.print("Connecting to ");
-  Serial.println(ssid);
+  Serial.println(data_ssid);
 
   /* Explicitly set the ESP8266 to be a WiFi-client, otherwise, it by default,
      would try to act as both a client and an access-point and could cause
      network-issues with your other WiFi-devices on your WiFi-network. */
   WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
+  WiFi.begin(data_ssid.c_str(), data_password.c_str());
 
   int wifi_timeout = 6000; // time this would take try connecting to wifi -> 10 sec
   long startwifitimer = millis();
 
-  while ((WiFi.status() != WL_CONNECTED) || millis() - startwifitimer < wifi_timeout)
+  while (WiFi.status() != WL_CONNECTED)
   {
+    if (millis() - startwifitimer > wifi_timeout)
+    {
+      break; // break the while loop after wifi timeout .ie 4sec
+    }
     delay(500);
     Serial.print(".");
   }
 
-  Serial.println("");
-  Serial.println("WiFi connected");
-  Serial.print("IP address: ");
-  Serial.println(WiFi.localIP());
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    Serial.println("");
+    Serial.println("WiFi connected");
+    Serial.print("IP address: ");
+    Serial.println(WiFi.localIP());
+  }
 }
 
 void makeHTTPRequest(String http_method, bool isPost, String data_URI)
@@ -689,8 +720,8 @@ void setup()
   // Push Button Events
   // button.attachClick(singleclick);         // link the function to be called on a singleclick event.
   button.attachDoubleClick(doubleclick); // link the function to be called on a doubleclick event.
-  // button.attachLongPressStart(hotspot);      // link the function to be called on a longpress event.
-  button.setPressTicks(3000); // Consider long clicks when button is held for 3 seconds
+  button.attachLongPressStart(hotspot);  // link the function to be called on a longpress event.
+  button.setPressTicks(3000);            // Consider long clicks when button is held for 3 seconds
 
   // Read the data from flash memory
   storage.begin("Data_vault", false); // false->, true -> Read only
@@ -701,6 +732,9 @@ void setup()
   disp_data_contact2 = storage.getString("contact2", "");
   disp_data_email = storage.getString("email", "");
   disp_data_email = storage.getString("notice", "");
+
+  data_ssid = storage.getString("ssid", "");     // Read Network SSID from memory
+  data_ssid = storage.getString("password", ""); // Read Network password from memory
 
   wifi_connect(); // call the wifi connect function
 
@@ -726,8 +760,16 @@ void setup()
   Serial.println(" ");
   Serial.println(" ");
 
-  display.clearDisplay(); // Clear what was previously displayed in the Panel
+  delay(50);
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(matrix_height / 2, 10);
+  // display.print("Booting up");
+  // display_update_enable(true); // timer interrupt to update the display.
   yield();
+  // delay(2000);
+
+  display.clearDisplay(); // Clear what was previously displayed in the Panel
 
   start_time = millis();
   start_time1 = millis();   //[Email Scrolling delay]
@@ -735,6 +777,8 @@ void setup()
   httpget_timer = millis(); // to get Http Requests
   doubleclick1(1);          // to display the 'In' status on bootup
 }
+
+// the code in this section would run endlessly
 
 void loop()
 {
@@ -758,34 +802,6 @@ void loop()
     printmail(disp_data_email); // Call function and display First
   }
 
-  /*
-    if (millis() - start_timer >= 20000)
-    {
-      counter++;
-      start_timer = millis();
-
-      if (counter == 1)
-      {
-        Presence_status = "Present";
-        queryString = String("?attendances=") + String(Presence_status) + String("&deviceId=") + String(Device_ID);
-        makeHTTPRequest("POST", true, String(post_URI));
-      }
-      if (counter == 2)
-      {
-        Presence_status = "Absent";
-        queryString = String("?attendances=") + String(Presence_status) + String("&deviceId=") + String(Device_ID);
-        makeHTTPRequest("POST", true, String(post_URI));
-      }
-      if (counter == 3)
-      {
-        Presence_status = "onfield";
-        queryString = String("?attendances=") + String(Presence_status) + String("&deviceId=") + String(Device_ID);
-        makeHTTPRequest("POST", true, String(post_URI));
-        counter = 0;
-        Serial.println();
-      }
-    }
-    */
   if (WiFi.status() == WL_CONNECTED && current_statas != statas)
   {
     current_statas = statas;
@@ -824,5 +840,137 @@ void loop()
     Serial.println("Notice: " + data_outNote);
     Serial.println(" ");
     Serial.println(" ");
+  }
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    display.fillCircle(0, 0, 2, myRED);
+  }
+  else
+  {
+    display.fillCircle(0, 0, 2, myGREEN);
+  }
+}
+
+/**********************************************************************************************************************************************/
+// Start the hotspot and start the web-server
+
+void hotspot()
+{
+  Serial.print("Starting up hotspot");
+  launchWeb();
+  setupAP(); // Setup HotSpot
+
+  while (true)
+  {
+    display.setFont();
+    display.setTextSize(1);
+    diaplay.setCursor(matrix_width - (6 * 15), 10);
+    display.print("Hotspot Active!");
+    diaplay.setCursor(matrix_width - (6 * 14), 20);
+    display.print("IP: " + WiFi.softAPIP());
+    server.handleClient();
+    yield();
+  }
+}
+// End this function
+
+void launchWeb()
+{
+  Serial.println("");
+  Serial.println(WiFi.softAPIP());
+  createWebServer();
+  // Start the server
+  server.begin();
+  Serial.println("Server started");
+}
+
+void setupAP(void)
+{
+  WiFi.mode(WIFI_STA);
+  delay(150);
+  WiFi.softAP(AP_ssid, AP_password);
+  Serial.println("Enter Values");
+  launchWeb();
+  Serial.println("over");
+}
+
+void createWebServer()
+{
+  {
+    server.on("/", []()
+              {
+      IPAddress ip = WiFi.softAPIP();
+      String ipStr = String(ip[0]) + '.' + String(ip[1]) + '.' + String(ip[2]) + '.' + String(ip[3]);
+      content = "<!DOCTYPE html><html lang='en'> <head>  <title>Smart Led</title>";
+      content +="<meta charset='UTF-8'> <meta http-equiv='X-UA-Compatible' content='IE=edge'> ";
+      content +="<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
+      content +="<title>Smart Led</title>";
+     
+      //CSS styling
+      content +="<style>  .workarea{ padding: 30px 50px; border-radius: 10px; background-color: aquamarine; width: 150px ; ";
+      content +="position: absolute; top: 50%; left: 50%;transform: translateX(-50%) translateY(-80%);}";
+      content +=" input{ padding: 10px 7px; border-radius: 10px; width: 100%; }";
+
+      content +=".val1{ padding-top: 5px; }";
+      content +=".val2{ padding-top: 5px; }";
+      content +="h3 { text-align: center; }";
+      content +="p { padding-top: 10px; text-align: right; }";
+      content +="input[type = submit]{ padding: 10px 5px; border-radius: 10px; width: 100%; background-color: bisque;}";
+      content +="</style></head> <body bgcolor='grey'> ";
+      
+      //true html code begins here.
+      
+      content +="<form method='get' action='setting'>";
+      content +="<div class='workarea'>";
+      content +=" <h3>Setup WiFi Network</h3> <br>";
+
+
+      //Input box for SSID Name
+      content +="<label for='ssid'>Network SSID:</label>"; 
+      content +="<div class='val1'><INPUT type='text' name='ssid' id ='ssid' placeholder='Enter the WiFi Name' required></div> <br>";
+      
+      
+      //Input box for Lastname
+      content +="<label for='password'>Password:</label>";
+      content +="<div class='val2'><INPUT type='password' name='password' id='password' placeholder='Enter the Password' required> </div><br>";
+      
+      //for submit
+      content +=" <INPUT type='submit' value = 'Submit'> <br>";
+      //company text
+      content +="<p> Smart Led by Smarttech Nepal</p>";
+      content +=" </div> </form> </body> </html>";
+      
+      server.send(200, "text/html", content); });
+
+    // Retrive the data sent by the mobile device.
+    server.on("/setting", []()
+              {
+      String data_SSID = server.arg("ssid");         // Get the Data from mobile device
+      String data_Password = server.arg("password"); // Get the Data from mobile device
+
+      storage.putString("ssid", data_SSID);         // save the data into SPIFFS memory
+      storage.putString("password", data_Password); // save the data into memory
+
+      Serial.println("SSID Name: " + data_SSID); 
+      Serial.println("SSID size: " + data_SSID.length());      // print the length of network name to Serial monitor
+       Serial.println("Password: " + data_Password);
+      Serial.println("Password size: " + data_Password.length()); // print the length of password to Serial monitor
+
+if(data_SSID.length() >= 2 && data_Password.length() >=2){
+
+      content = "{\"Success\":\"saved to eeprom... reset to boot into new wifi\"}";
+
+      statusCode = 200;
+      delay(500);
+      ESP.restart(); // Restart Esp after the data has been saved.
+}
+ else {
+        content = "{\"Error\":\"404 not found\"}";
+        statusCode = 404;
+        Serial.println("Sending 404");
+      }
+
+      server.sendHeader("Access-Control-Allow-Origin", "*");
+      server.send(statusCode, "application/json", content); });
   }
 }
